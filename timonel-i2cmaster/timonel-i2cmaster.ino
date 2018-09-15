@@ -5,8 +5,8 @@
 // *  ..................................................  *
 // *  Author: Gustavo Casanova                            *
 // *  ..................................................  *
-// *  Firmware Version: 0.7 | MCU: ESP8266                *
-// *  2018-09-09 gustavo.casanova@nicebots.com            *
+// *  Firmware Version: 0.8 | MCU: ESP8266                *
+// *  2018-09-13 gustavo.casanova@nicebots.com            *
 // ********************************************************
 //
 // Run this master program on a NodeMCU, ESP-01 or ESP-12 Module
@@ -28,8 +28,7 @@
 #include "nb-i2c-cmd.h"
 #include "nb-i2c-crc.h"
 #include <pgmspace.h>
-//#include "tml-payload.h"
-#include "payloads/payload.h"
+#include "Payloads/payload.h"
 
 // Timonel bootloader
 #define MCUTOTALMEM		8192	/* Slave MCU total flash memory*/
@@ -44,10 +43,12 @@ byte blockRXSize = 0;
 bool newKey = false;
 bool newByte = false;
 bool newWord = false;
-bool appMode = true;
+byte sysMode = 0;				/* system mode [0 = unknown], [1 = bootloader], [2 = I2C application], [3 = Other application] */
 char key = '\0';
 word flashPageAddr = 0xFFFF;	/* Current flash  page address to be written. Tiny85 allowed values are 0 to 0x2000, so 0xFFFF means 'not set' */
 word timonelStart = 0xFFFF;		/* Timonel start address, 0xFFFF means 'not set'. Use Timonel 'version' command to get it */
+
+bool haveToFlash = false;
 
 //
 // *****************************
@@ -62,23 +63,37 @@ void setup() {
 						//Wire.begin(D3, D4); // Set SDA on D3 and SCL on D4 (NodeMCU)
 	delay(100);         // Wait 100 ms for slave init sequence
 						// Search continuouly for slave addresses
-	while (slaveAddress == 0) {
-		slaveAddress = ScanI2C();
-		delay(250);		// Delay 1/4 second before sending I2C commands
+
+	if (getSystemMode(20) == 0) {
+		Serial.println("\nUnable to detect a slave device, maybe the application is not I2C ...\n");
+		sysMode = 3;	/* [3 = Other application]  */
+		//delay(3000);
+		//ResetESP8266();
+		//exit;
+	}
+	else if (sysMode == 1) {
+		if (haveToFlash == true) {
+			Serial.println("\nTimonel detected, initializing it for flashing payload ...\n");
+			// Run ATtiny85 initialization command
+			initTiny();				/* Two-step Timonel initialization - Step 1 */
+			GetTimonelVersion();	/* Two-step Timonel initialization - Step 2 */
+		}
+		else {
+			Serial.println("\nTimonel answered but there's nothing to flash, letting it exit ...\n");
+			delay(3000);
+			if (ScanI2C() > 35) {
+				Serial.println("\nI2C Application detected, entering operational mode ...\n");
+				sysMode = 2;
+			}
+		}
 	}
 
-	// Run ATtiny85 initialization command
-	byte cmdTX[1] = { INITTINY };
-	Wire.beginTransmission(slaveAddress);
-	Wire.write(cmdTX[0]);
-	Wire.endTransmission();
-	blockRXSize = Wire.requestFrom(slaveAddress, (byte)1);
-	blockRXSize = 0;
-
-	ClrScr();
-	Serial.println("Timonel Bootloader and Application I2C Commander Test (v0.7)");
-	Serial.println("============================================================");
-	ShowMenu();
+	if ((sysMode == 1) || (sysMode == 2)) {
+		ClrScr();
+		Serial.println("Timonel Bootloader and Application I2C Commander Test (v0.8)");
+		Serial.println("============================================================");
+		ShowMenu();
+	}
 }
 
 //
@@ -92,23 +107,23 @@ void loop() {
 		Serial.println("");
 		Serial.println("");
 		switch (key) {
-		// *********************************
-		// * Test App ||| STDPB1_1 Command *
-		// *********************************
+			// *********************************
+			// * Test App ||| STDPB1_1 Command *
+			// *********************************
 		case 'a': case 'A': {
 			SetPB1On();
 			break;
 		}
-		// *********************************
-		// * Test App ||| STDPB1_0 Command *
-		// *********************************
+				  // *********************************
+				  // * Test App ||| STDPB1_0 Command *
+				  // *********************************
 		case 's': case 'S': {
 			SetPB1Off();
 			break;
 		}
-		// *********************************
-		// * Test App ||| RESETINY Command *
-		// *********************************
+				  // *********************************
+				  // * Test App ||| RESETINY Command *
+				  // *********************************
 		case 'x': case 'X': {
 			ResetTiny();
 			Serial.println("\n  .\n\r . .\n\r. . .\n");
@@ -116,26 +131,24 @@ void loop() {
 			ESP.restart();
 			break;
 		}
-		// *******************
-		// * Restart ESP8266 *
-		// *******************
+				  // *******************
+				  // * Restart ESP8266 *
+				  // *******************
 		case 'z': case 'Z': {
-			Serial.println("\nResetting ESP8266 ...");
-			Serial.println("\n.\n.\n.\n");
-			ESP.restart();
+			ResetESP8266();
 			break;
 		}
-		// ********************************
-		// * Timonel ::: GETTMNLV Command *
-		// ********************************
+				  // ********************************
+				  // * Timonel ::: GETTMNLV Command *
+				  // ********************************
 		case 'v': case 'V': {
 			//Serial.println("\nBootloader Cmd >>> Get bootloader version ...");
 			GetTimonelVersion();
 			break;
 		}
-		// ********************************
-		// * Timonel ::: EXITTMNL Command *
-		// ********************************
+				  // ********************************
+				  // * Timonel ::: EXITTMNL Command *
+				  // ********************************
 		case 'r': case 'R': {
 			//Serial.println("\nBootloader Cmd >>> Run Application ...");
 			RunApplication();
@@ -144,17 +157,17 @@ void loop() {
 			ESP.restart();
 			break;
 		}
-		// ********************************
-		// * Timonel ::: DELFLASH Command *
-		// ********************************
+				  // ********************************
+				  // * Timonel ::: DELFLASH Command *
+				  // ********************************
 		case 'e': case 'E': {
 			//Serial.println("\nBootloader Cmd >>> Delete app firmware from T85 flash memory ...");
 			DeleteFlash();
 			break;
 		}
-		// ********************************
-		// * Timonel ::: STPGADDR Command *
-		// ********************************
+				  // ********************************
+				  // * Timonel ::: STPGADDR Command *
+				  // ********************************
 		case 'b': case 'B': {
 			byte resetFirstByte = 0;
 			byte resetSecondByte = 0;
@@ -189,9 +202,9 @@ void loop() {
 			}
 			break;
 		}
-		// ********************************
-		// * Timonel ::: WRITPAGE Command *
-		// ********************************
+				  // ********************************
+				  // * Timonel ::: WRITPAGE Command *
+				  // ********************************
 		case 'w': case 'W': {
 			//Serial.println("\nBootloader Cmd >>> Write new app firmware to T85 flash memory ...");
 			WriteFlash();
@@ -199,9 +212,9 @@ void loop() {
 			//FlashTrampoline();
 			break;
 		}
-		// ********************************
-		// * Timonel ::: READPAGE Command *
-		// ********************************
+				  // ********************************
+				  // * Timonel ::: READPAGE Command *
+				  // ********************************
 		case 'q': case 'Q': {
 			byte dataSize = 0;	// 10-bit buffer data size requested to ATtiny85
 			byte dataIX = 0;	// Requested 10-bit buffer data start position
@@ -227,18 +240,18 @@ void loop() {
 			}
 			break;
 		}
-		// ******************
-		// * ? Help Command *
-		// ******************
-		case '?': case '�': {
+				  // ******************
+				  // * ? Help Command *
+				  // ******************
+		case '?': case '¿': {
 			Serial.println("\n\rHelp ...");
 			Serial.println("========");
 			//ShowHelp();
 			break;
 		}
-		// *******************
-		// * Unknown Command *
-		// *******************
+				  // *******************
+				  // * Unknown Command *
+				  // *******************
 		default: {
 			Serial.print("ESP8266 - Command '");
 			Serial.print(key);
@@ -254,26 +267,37 @@ void loop() {
 
 // Function ScanI2C
 byte ScanI2C() {
-	//clrscr();
+	//
+	// Address 08 to 35: Timonel bootloader
+	// Address 36 to 64: Application firmware
+	// Each I2C slave must have a unique bootloader address that corresponds
+	// to a defined application address, as shown in this table:
+	// T: |08|09|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|32|33|34|35|
+	// A: |36|37|38|39|40|41|42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63|
+	//
 	Serial.println("Scanning I2C bus ...");
 	byte slaveAddr = 0, scanAddr = 8;
 	while (scanAddr < 120) {
 		Wire.beginTransmission(scanAddr);
 		if (Wire.endTransmission() == 0) {
-			if (scanAddr < 21) {
+			slaveAddr = scanAddr;
+			if (slaveAddr >= 8 && slaveAddr <= 35) {
+				sysMode = 1;		/* We're in bootloader mode */
 				Serial.print("Timonel Bootloader found at address: ");
-				appMode = false;
+			}
+			else if (slaveAddr >= 36 && slaveAddr <= 63) {
+				sysMode = 2;		/* We're in application mode */
+				Serial.print("Application Firmware found at address: ");
 			}
 			else {
-				Serial.print("Test App Firmware found at address: ");
-				appMode = true;
+				sysMode = 0;		/* We're in trouble ... */
+				Serial.print("Address out of range: ");
 			}
 			Serial.print(scanAddr, DEC);
 			Serial.print(" (0x");
 			Serial.print(scanAddr, HEX);
 			Serial.println(")");
 			delay(500);
-			slaveAddr = scanAddr;
 		}
 		scanAddr++;
 	}
@@ -290,6 +314,34 @@ byte CalculateCRC(byte* block, size_t blockLength) {
 	}
 	return crc;
 }
+
+// Function ResetESP8266
+void ResetESP8266(void) {
+	Serial.println("\nResetting ESP8266 ...");
+	Serial.println("\n.\n.\n.\n");
+	ESP.restart();
+}
+
+// Function getSystemMode
+byte getSystemMode(int attempts) {
+	int attCnt = 0;
+	while ((slaveAddress == 0) && (attCnt++ <= attempts)) {
+		slaveAddress = ScanI2C();
+		delay(250);		// Delay 1/4 second between attemps
+	}
+	return sysMode;
+}
+
+// Function InitTyny
+void initTiny(void) {
+	byte cmdTX[1] = { INITTINY };
+	Wire.beginTransmission(slaveAddress);
+	Wire.write(cmdTX[0]);
+	Wire.endTransmission();
+	blockRXSize = Wire.requestFrom(slaveAddress, (byte)1);
+	blockRXSize = 0;
+}
+
 
 // Function ReadChar
 void ReadChar() {
@@ -955,10 +1007,37 @@ int WriteFlash(void) {
 
 //Function ShowMenu
 void ShowMenu(void) {
-	if (appMode == true) {
+	if (sysMode == 1) {
+		Serial.print("Payload type ready to upload = ");
+		switch (payldType) {
+		case 0: {
+			Serial.println("[ User Application ]");
+			break;
+		}
+		case 1: {
+			Serial.println("[ Timonel Bootloader Update ]");
+			break;
+		}
+		default: {
+			Serial.println("[ Unknown ]");
+			break;
+		}
+		}
+		Serial.print("\nTimonel booloader ('v' version, 'r' run app, 'e' erase flash, 'b' set address, 'w' write flash, 'q' read flash): ");
+	}
+	else if (sysMode == 2) {
 		Serial.print("Application command ('a', 's', 'z' reboot, 'x' reset T85, '?' help): ");
 	}
+	else if (sysMode == 3) {
+		Serial.println("Just letting the application run, please power this device off and on to reset ...\n");
+	}
 	else {
-		Serial.print("Timonel booloader ('v' version, 'r' run app, 'e' erase flash, 'b' set address, 'w' write flash, 'q' read flash): ");
+		Serial.println("I don't know what to do, resetting !!! \n");
+		for (int i = 0; i < 10; i++) {
+			Serial.print(". ");
+			delay(3000);
+		}
+		Serial.println("");
+		ResetESP8266();
 	}
 }
